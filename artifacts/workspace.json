@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid28717",
+  "B": "/home/dev/feedback/uid28717",
+  "sha": "3f6d7eedf07da21da69fcb15f8dd53766e649d4c",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "nolze",
+    "repo": "msoffcrypto-tool",
+    "sha": "3f6d7eedf07da21da69fcb15f8dd53766e649d4c"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "msoffcrypto-tool",
+    "cloneUrl": "https://github.com/Rrr119/msoffcrypto-tool.git"
+  },
+  "at": "2026-11-19T18:31:08.497Z"
+}

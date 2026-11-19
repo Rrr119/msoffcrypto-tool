@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import base64
-import functools
 import hmac
 import io
 import logging
 import secrets
+from collections.abc import Iterator
 from hashlib import sha1, sha256, sha384, sha512
 from struct import pack, unpack
+from typing import BinaryIO
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
@@ -61,6 +62,16 @@ def _normalize_key(key, n):
 
 def _get_hash_func(algorithm):
     return ALGORITHM_HASH.get(algorithm, sha1)
+
+
+def _read_exact(ibuf: BinaryIO, size: int) -> bytes:
+    data = bytearray()
+    while len(data) < size:
+        chunk = ibuf.read(size - len(data))
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
 
 
 def _decrypt_aes_cbc(data, key, iv):
@@ -197,10 +208,15 @@ class ECMA376Agile:
         hashCalc = _get_hash_func(hashAlgorithm)
         h_final = hashCalc(h + blockKey)
 
-        # NOTE: Needed to truncate encryption key to bitsize
-        encryption_key = h_final.digest()[: keyBits // 8]
+        key_size = keyBits // 8
+        encryption_key = h_final.digest()
 
-        return encryption_key
+        # NOTE: [MS-OFFCRYPTO] 2.3.4.11 pads short hashes with 0x36 before
+        # truncating to the requested key size.
+        if len(encryption_key) < key_size:
+            encryption_key += b"\x36" * (key_size - len(encryption_key))
+
+        return encryption_key[:key_size]
 
     @staticmethod
     def decrypt(key, keyDataSalt, hashAlgorithm, ibuf):
@@ -211,22 +227,43 @@ class ECMA376Agile:
             >>> keyDataSalt = b'\x8f\xc7x"+P\x8d\xdcL\xe6\x8c\xdd\x15<\x16\xb4'
             >>> hashAlgorithm = 'SHA512'
         """
+        return b"".join(
+            ECMA376Agile.decrypt_stream(key, keyDataSalt, hashAlgorithm, ibuf)
+        )
+
+    @staticmethod
+    def decrypt_stream(
+        key: bytes, keyDataSalt: bytes, hashAlgorithm: str, ibuf: BinaryIO
+    ) -> Iterator[bytes]:
+        r"""
+        Yield decrypted data in chunks.
+
+        The encrypted package is read in 4096-byte segments, matching the
+        segment size defined by the Agile Encryption specification. The caller
+        can therefore write each chunk directly to its destination instead of
+        buffering the complete decrypted package.
+        """
         # NOTE: See https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-offcrypto/9e61da63-8ddb-4c0a-b25d-f85d990f44c8
         SEGMENT_LENGTH = 4096
         hashCalc = _get_hash_func(hashAlgorithm)
 
-        obuf = io.BytesIO()
-
         # NOTE: See https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-offcrypto/b60c8b35-2db2-4409-8710-59d88a793f83
         ibuf.seek(0)
-        totalSize = unpack("<Q", ibuf.read(8))
-        totalSize = totalSize[0]
+        size_header = _read_exact(ibuf, 8)
+        if len(size_header) != 8:
+            raise exceptions.DecryptionError(
+                "EncryptedPackage is too short to contain its size"
+            )
+        totalSize = unpack("<Q", size_header)[0]
         logger.debug("totalSize: {}".format(totalSize))
         remaining = totalSize
-        for i, buf in enumerate(
-            iter(functools.partial(ibuf.read, SEGMENT_LENGTH), b"")
-        ):
-            saltWithBlockKey = keyDataSalt + pack("<I", i)
+        segment_index = 0
+        while remaining > 0:
+            buf = _read_exact(ibuf, SEGMENT_LENGTH)
+            if not buf:
+                break
+
+            saltWithBlockKey = keyDataSalt + pack("<I", segment_index)
             iv = hashCalc(saltWithBlockKey).digest()
             iv = iv[:16]
             aes = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
@@ -235,12 +272,10 @@ class ECMA376Agile:
             # TODO: Check
             if remaining < len(dec):
                 dec = dec[:remaining]
-            obuf.write(dec)
+            if dec:
+                yield dec
             remaining -= len(dec)
-            # TODO: Check if this is needed
-            if remaining <= 0:
-                break
-        return obuf.getvalue()  # return obuf.getbuffer()
+            segment_index += 1
 
     @staticmethod
     def encrypt(key, ibuf, salt_value=None, spin_count=100000):

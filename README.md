@@ -86,6 +86,8 @@ with open("decrypted.docx", "wb") as f:
 encrypted.close()
 ```
 
+Decryption writes output incrementally, so the destination only needs to be writable; it does not need to support seeking.
+
 In-memory:
 
 ```python

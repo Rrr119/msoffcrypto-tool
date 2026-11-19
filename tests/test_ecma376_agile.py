@@ -2,10 +2,14 @@
 
 import io
 import unittest
+from hashlib import sha1
 from os.path import dirname, join
 
 from msoffcrypto import OfficeFile, exceptions
-from msoffcrypto.method.ecma376_agile import ECMA376Agile
+from msoffcrypto.method.ecma376_agile import (
+    ECMA376Agile,
+    blkKey_encryptedKeyValue,
+)
 
 #: directory with input
 DATA_DIR = join(dirname(__file__), "inputs")
@@ -24,6 +28,18 @@ EXAMPLE_FILES = (
 
 class ECMA376AgileTest(unittest.TestCase):
     """See module doc."""
+
+    def test_derive_encryption_key_pads_short_hash(self):
+        password_hash = sha1(b"password hash").digest()
+        key = ECMA376Agile._derive_encryption_key(
+            password_hash,
+            blkKey_encryptedKeyValue,
+            "SHA1",
+            256,
+        )
+
+        expected_prefix = sha1(password_hash + blkKey_encryptedKeyValue).digest()
+        self.assertEqual(key, expected_prefix + b"\x36" * (32 - len(expected_prefix)))
 
     def test_verify_password_and_integrity(self):
         for in_name, out_name in EXAMPLE_FILES:

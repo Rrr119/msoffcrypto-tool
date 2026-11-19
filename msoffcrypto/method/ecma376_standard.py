@@ -1,13 +1,28 @@
-import io
 import logging
+from collections.abc import Iterator
 from hashlib import sha1
 from struct import pack, unpack
+from typing import BinaryIO
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from msoffcrypto import exceptions
+
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+SEGMENT_LENGTH = 4096
+
+
+def _read_exact(ibuf: BinaryIO, size: int) -> bytes:
+    data = bytearray()
+    while len(data) < size:
+        chunk = ibuf.read(size - len(data))
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
 
 
 class ECMA376Standard:
@@ -20,16 +35,43 @@ class ECMA376Standard:
         Return decrypted data.
 
         """
-        obuf = io.BytesIO()
-        totalSize = unpack("<I", ibuf.read(4))[0]
+        return b"".join(ECMA376Standard.decrypt_stream(key, ibuf))
+
+    @staticmethod
+    def decrypt_stream(key: bytes, ibuf: BinaryIO) -> Iterator[bytes]:
+        r"""
+        Yield decrypted data in chunks.
+
+        Standard Encryption stores the plaintext size in the first eight bytes
+        of the encrypted package and then encrypts the payload with AES-ECB.
+        Only the requested plaintext bytes are yielded, excluding AES padding.
+        """
+        size_header = _read_exact(ibuf, 8)
+        if len(size_header) != 8:
+            raise exceptions.DecryptionError(
+                "EncryptedPackage is too short to contain its size"
+            )
+        totalSize = unpack("<I", size_header[:4])[0]
         logger.debug("totalSize: {}".format(totalSize))
         ibuf.seek(8)
         aes = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
         decryptor = aes.decryptor()
-        x = ibuf.read()
-        dec = decryptor.update(x) + decryptor.finalize()
-        obuf.write(dec[:totalSize])
-        return obuf.getvalue()  # return obuf.getbuffer()
+        remaining = totalSize
+        while remaining > 0:
+            buf = _read_exact(ibuf, SEGMENT_LENGTH)
+            if not buf:
+                break
+
+            dec = decryptor.update(buf)
+            if remaining < len(dec):
+                dec = dec[:remaining]
+            if dec:
+                yield dec
+            remaining -= len(dec)
+
+        dec = decryptor.finalize()
+        if remaining > 0 and dec:
+            yield dec[:remaining]
 
     @staticmethod
     def verifykey(key, encryptedVerifier, encryptedVerifierHash):
